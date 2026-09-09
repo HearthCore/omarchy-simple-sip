@@ -86,6 +86,12 @@ Item {
   property double callStartedAt: 0
   property string lastError: ""
   property string lastClosedReason: ""
+  // Which of the two sources spoke last. A status snapshot is a request/reply
+  // round trip, so its answer can predate a call event that arrived while it
+  // was in flight -- comparing these is what keeps applyStatus from clearing a
+  // call that started after it asked.
+  property double lastCallEventAt: 0
+  property double statusRequestedAt: 0
   // Recent calls, newest first, as recorded by the daemon.
   property var history: []
 
@@ -136,6 +142,7 @@ Item {
   function refresh() {
     refreshHistory()
     if (statusProcess.running) return
+    statusRequestedAt = Date.now()
     statusProcess.command = [cli, "status"]
     statusProcess.running = true
     statusWatchdog.restart()
@@ -269,6 +276,7 @@ Item {
     }
 
     if (update.kind === "call") {
+      lastCallEventAt = Date.now()
       var wasRinging = callState === "incoming"
       callState = update.callState
       if (update.callState === "idle") {
@@ -284,11 +292,15 @@ Item {
         if (update.callId) callId = update.callId
         if (update.started && callStartedAt === 0) callStartedAt = Date.now()
       }
-      if (update.callState === "incoming" && !wasRinging) {
-        notifyIncoming(peer)
-        root.incomingCall(peer)
-      }
+      if (update.callState === "incoming" && !wasRinging) announceIncoming()
     }
+  }
+
+  // Ringing is the one state the panel must never miss, so both the event
+  // stream and a status resync funnel through here.
+  function announceIncoming() {
+    notifyIncoming(peer)
+    root.incomingCall(peer)
   }
 
   function notifyIncoming(peerUri) {
@@ -329,9 +341,25 @@ Item {
       registration = "unknown"
     }
 
-    // A call that ended while the shell was restarting leaves stale UI state.
+    // Events carry the truth; this is the resync that repairs what they missed.
     if (status.calls && status.calls.data !== undefined) {
-      if (Model.parseCallCount(status.calls.data) === 0 && callState !== "incoming") {
+      var incoming = Model.parseIncomingCall(status.calls.data)
+      if (incoming && callState !== "incoming") {
+        // A call is ringing right now and no CALL_INCOMING ever reached us --
+        // the listener was between reconnects. Adopt it: without this the
+        // panel offers no Answer for the whole life of the call, and no
+        // poll can ever recover it.
+        callState = "incoming"
+        peer = incoming.peer
+        callId = ""
+        callStartedAt = 0
+        announceIncoming()
+      } else if (Model.parseCallCount(status.calls.data) === 0
+                 && (callState !== "incoming" || statusRequestedAt > lastCallEventAt)) {
+        // A call that ended while the shell was restarting leaves stale UI
+        // state. Clearing a ringing call is only safe when this snapshot was
+        // asked for after the last call event we saw -- otherwise it is a
+        // reply that predates a call which is still coming up.
         callState = "idle"
         peer = ""
         callId = ""

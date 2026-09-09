@@ -622,6 +622,12 @@ class ControlHub:
         self.dir_fd = dir_fd
         self.name = name
         self.clients: dict[socket.socket, dict] = {}
+        # Replayed to every client that connects from here on. CTRL_CONNECTED is
+        # broadcast once, when baresip's bus comes up, so without this a client
+        # that connects later -- which is every client, the daemon outlives the
+        # shell -- never learns the daemon is up and never resets its reconnect
+        # backoff. State, not history: only the latest greeting is kept.
+        self.greeting: bytes | None = None
         try:
             os.unlink(name, dir_fd=dir_fd)   # a stale socket from a crash
         except FileNotFoundError:
@@ -663,6 +669,10 @@ class ControlHub:
             return None
         conn.setblocking(False)
         self.clients[conn] = {"buf": b"", "out": b"", "dropping": False}
+        if self.greeting is not None:
+            self.send(conn, self.greeting)
+            if conn not in self.clients:
+                return None   # dropped mid-greeting; never hand it to the caller
         return conn
 
     def drop(self, conn: socket.socket) -> None:
@@ -723,6 +733,11 @@ class ControlHub:
         data = (text + "\n").encode("utf-8", "replace")
         for conn in list(self.clients):
             self.send(conn, data)
+
+    def greet(self, text: str) -> None:
+        """Broadcast a record and keep it as the greeting for future clients."""
+        self.greeting = (text + "\n").encode("utf-8", "replace")
+        self.broadcast(text)
 
     def send(self, conn: socket.socket, data: bytes) -> None:
         state = self.clients.get(conn)
@@ -1089,7 +1104,9 @@ def cmd_daemon(_args) -> int:
         baresip.terminate()
         die(f"baresip did not export {DBUS_NAME} -- see {RUN_DIR}/{BARESIP_LOG}")
 
-    journal({"type": "CTRL_CONNECTED"})
+    # Greeting rather than a plain journal entry: the panel's event listener
+    # reconnects throughout the daemon's life and needs this on every connect.
+    hub.greet(json.dumps({"type": "CTRL_CONNECTED"}, separators=(",", ":")))
 
     tracker = CallTracker(conf_fd())
     sel = selectors.DefaultSelector()
@@ -1280,9 +1297,18 @@ def read_lines(conn: socket.socket, deadline: float | None = None):
     the next newline, so nothing unbounded ever reaches a JSON parser -- this is
     the only thing standing between the daemon and the long-lived shell
     listener that consumes it.
+
+    `deadline` is for the bounded readers (a command awaiting its response).
+    Without one this is the panel's always-on event stream, and it must block:
+    connect_control() leaves its 5s connect timeout on the socket, so failing
+    to clear it here made `events` return -- and the caller exit 0 -- after the
+    first five quiet seconds, taking the only path an incoming call has to the
+    panel with it.
     """
     buf = b""
     dropping = False
+    if deadline is None:
+        conn.settimeout(None)
     while True:
         if deadline is not None:
             remaining = deadline - time.monotonic()

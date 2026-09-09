@@ -84,6 +84,26 @@ function parseCallCount(data) {
   return match ? parseInt(match[1], 10) : 0
 }
 
+// `listcalls` renders one call_debug block per call, headed by the call's own
+// state -- "===== Call debug (INCOMING) =====" for a call that is ringing and
+// has not been answered. Events are still the normal way the panel learns a
+// call is ringing; this is how a resync recovers one whose event it missed,
+// so it returns the peer too (from the block's own peer_uri line, not the
+// first one in the document, which may belong to another call).
+// Returns null when nothing is ringing.
+function parseIncomingCall(data) {
+  var blocks = stripAnsi(data).split("===== Call debug (")
+  for (var i = 1; i < blocks.length; i++) {
+    var block = blocks[i]
+    var close = block.indexOf(")")
+    if (close < 0) continue
+    if (block.substring(0, close).trim() !== "INCOMING") continue
+    var match = block.match(/peer_uri:\s*(.*)/)
+    return { peer: match ? peerLabel(match[1]) : "" }
+  }
+  return null
+}
+
 // ------------------------------------------------------------------ dialling
 
 // Accept what a person would actually type. A bare extension or phone number

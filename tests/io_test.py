@@ -478,6 +478,34 @@ a.close()
 check("stream drops an oversized record and resynchronises",
       lines == ['{"a":1}', '{"a":2}'])
 
+# The regression this whole class of bug came from: connect_control() leaves a
+# 5s timeout on the socket for the connect, and the event stream then reads
+# from it forever. A read_lines() with no deadline must clear that timeout, or
+# `omarchy-sip events` returns after the first quiet five seconds and the panel
+# loses the only path an incoming call has to reach it.
+a, b = socket.socketpair()
+a.settimeout(0.2)                       # stands in for the connect timeout
+stream = mod.read_lines(a)              # no deadline: the always-on listener
+b.sendall(b'{"a":1}\n')
+check("a deadline-less stream keeps its first record", next(stream) == '{"a":1}')
+check("... and does not inherit the connect timeout", a.gettimeout() is None)
+b.sendall(b'{"a":2}\n')                 # arrives well after any 0.2s timeout
+check("... so a quiet stream is not mistaken for the end of it",
+      next(stream) == '{"a":2}')
+stream.close()
+a.close()
+b.close()
+
+# A bounded reader still gets its deadline back.
+a, b = socket.socketpair()
+b.sendall(b'{"a":1}\n')
+started = time.monotonic()
+check("a deadline-carrying read still stops on its own",
+      list(mod.read_lines(a, time.monotonic() + 0.3)) == ['{"a":1}']
+      and time.monotonic() - started < 2.0)
+a.close()
+b.close()
+
 # A client that never sends a newline must not grow the daemon's buffer.
 srv_dir = mod.dir_fd_for(path("run"))
 hub = mod.ControlHub(srv_dir)
@@ -496,6 +524,21 @@ time.sleep(0.05)
 check("the stream resynchronises at the next newline",
       hub.read_commands(conn) == [b'{"command":"ok"}'])
 client.close()
+
+# CTRL_CONNECTED is broadcast once, when baresip comes up, but the panel's
+# listener reconnects for as long as the daemon lives -- so a client that
+# connects later must still be told the daemon is up, or it never resets its
+# reconnect backoff and never learns it can stop retrying.
+hub.greet('{"type":"CTRL_CONNECTED"}')
+late = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+late.connect(f"/proc/self/fd/{srv_dir}/control")
+late_conn = hub.accept()
+hub.flush_all()
+late.settimeout(1.0)
+check("a client connecting after the daemon is greeted on connect",
+      late.recv(4096) == b'{"type":"CTRL_CONNECTED"}\n')
+check("... and is a normal client afterwards", late_conn in hub.clients)
+late.close()
 hub.close()
 check("closing the hub removes the socket", not os.path.exists(path("run/control")))
 

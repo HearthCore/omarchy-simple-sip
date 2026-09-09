@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseReginfo,parseCallCount,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -37,6 +37,28 @@ t("reginfo expires form", M.parseReginfo("sip:a@x.com   OK  sip:x.com Expires 30
 
 t("callcount 2", M.parseCallCount("\n--- Active calls (2) ---\n"), 2);
 t("callcount 0", M.parseCallCount("\n(no active calls)\n"), 0);
+
+// listcalls renders one call_debug block per call, headed by that call's state.
+const RINGING = [
+  "", "User-Agent: 3077@pbx", "--- Active calls (1) ---",
+  "  ===== Call debug (INCOMING) =====",
+  " local_uri: 3077 <sip:3077@pbx>",
+  ' peer_uri:  "Bob" <sip:27126578500@197.234.132.106>',
+  " af=AF_INET id=bfe5ab9c6e3ed168",
+  " direction: Incoming", "",
+].join("\n");
+t("incoming from listcalls", M.parseIncomingCall(RINGING), { peer: "27126578500@197.234.132.106" });
+t("incoming none when idle", M.parseIncomingCall("\n--- Active calls (0) ---\n"), null);
+t("incoming ignores an established call",
+  M.parseIncomingCall("--- Active calls (1) ---\n  ===== Call debug (ESTABLISHED) =====\n peer_uri:  <sip:b@x>\n"), null);
+t("incoming ignores an outgoing call",
+  M.parseIncomingCall("  ===== Call debug (OUTGOING) =====\n peer_uri:  <sip:b@x>\n"), null);
+t("incoming takes the ringing call's own peer, not the first in the document",
+  M.parseIncomingCall("  ===== Call debug (ESTABLISHED) =====\n peer_uri:  <sip:first@x>\n"
+                    + "  ===== Call debug (INCOMING) =====\n peer_uri:  <sip:second@x>\n"),
+  { peer: "second@x" });
+t("incoming with no peer_uri still reports the ring",
+  M.parseIncomingCall("  ===== Call debug (INCOMING) =====\n"), { peer: "" });
 
 t("classify incoming", M.classifyEvent({ type: "CALL_INCOMING", peeruri: "sip:bob@x", id: "a1" }),
   { kind: "call", callState: "incoming", peer: "bob@x", callId: "a1" });
