@@ -66,6 +66,11 @@ A bare extension or phone number is completed with your account's domain, so `10
 dials `sip:1001@pbx.example.com`. Incoming calls raise a critical-urgency
 notification and (by default) open the panel.
 
+The ring itself is a generated 400+450 Hz double-ring, written to
+`~/.config/omarchy-sip/ring.wav` on daemon start. baresip's bundled `ring.wav` is a
+recording of a voice announcing that the phone is ringing, which is not what a phone
+sounds like; the cadence and level are the `RING_*` constants in `bin/omarchy-sip`.
+
 ### Recent calls
 
 The panel keeps a short log of calls made, received and missed. An inbound call that

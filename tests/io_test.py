@@ -7,7 +7,7 @@ following, blocking, or buffering without limit.
 
 Run: python3 tests/io_test.py
 """
-import contextlib, importlib.machinery, importlib.util, io, json, os, socket, stat, subprocess, sys, tempfile, time
+import contextlib, importlib.machinery, importlib.util, io, json, os, socket, stat, struct, subprocess, sys, tempfile, time, wave
 
 spec = importlib.util.spec_from_loader(
     "omarchy_sip",
@@ -466,6 +466,44 @@ check("dispatch clips an overlong token on the accepted path",
       len(dispatched(b'{"command":"hangup","token":"' + b"z" * 500 + b'"}')[0][0][1]) == 128)
 check("dispatch clips an overlong token on the rejected path",
       len(dispatched(b'{"command":"quit","token":"' + b"z" * 500 + b'"}')[1][0]["token"]) == 128)
+
+
+# ----------------------------------------------------------------- ringtone
+
+ring = mod.ringtone_wav()
+wav = wave.open(io.BytesIO(ring))
+check("the ringtone is a WAV the stdlib can parse", wav.getnframes() > 0)
+check("...mono 16-bit PCM at the alert rate, which is what aufile_open accepts",
+      (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, mod.RING_RATE))
+check("...its declared length matches the cadence",
+      wav.getnframes() == int(sum(sec for sec, _ in mod.RING_CADENCE) * mod.RING_RATE))
+check("...and its header sizes agree with the payload",
+      struct.unpack("<I", ring[4:8])[0] == len(ring) - 8
+      and struct.unpack("<I", ring[40:44])[0] == len(ring) - 44)
+
+pcm = struct.unpack(f"<{wav.getnframes()}h", wav.readframes(wav.getnframes()))
+
+
+def loudness(start, end):
+    seg = pcm[int(start * mod.RING_RATE):int(end * mod.RING_RATE)]
+    return max(abs(v) for v in seg)
+
+
+# Two bursts with a gap, then a long pause -- a ring, not a continuous tone.
+check("the ringtone actually rings twice", loudness(0.05, 0.35) > 3000
+      and loudness(0.45, 0.55) == 0 and loudness(0.65, 0.95) > 3000)
+check("...then pauses before repeating", loudness(1.2, 2.9) == 0)
+check("...without clipping", max(abs(v) for v in pcm) < 32767)
+check("...and starts and ends at silence, so a loop has no click in it",
+      pcm[0] == 0 and pcm[-1] == 0)
+
+# It is written as bytes through the same 0600 create-and-rename path as the
+# rest of the config directory, so the text-only assumption cannot creep back.
+ring_dir = mod.dir_fd_for(path("run"))
+mod.write_private("ring.wav", ring, ring_dir)
+check("the ringtone is written byte-exact and 0600",
+      open(path("run/ring.wav"), "rb").read() == ring
+      and stat.S_IMODE(os.stat(path("run/ring.wav")).st_mode) == 0o600)
 
 
 # ------------------------------------------------------------- socket bounds
