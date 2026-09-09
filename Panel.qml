@@ -34,6 +34,15 @@ Panel {
   // shortcuts (a / d / b) only apply in the states that have no input.
   readonly property bool textInputActive: dialRow.visible || setupForm.visible
 
+  // ...and when the last one leaves the screen, the keyboard has to come back.
+  // Nothing else claims it: dialField takes focus when it appears and no one
+  // hands it back when it goes, so a call arriving while the panel was already
+  // open left Answer on screen with focus stranded on a hidden field -- no
+  // 'a', no cursor keys, no Enter. Only reopening the panel recovered it.
+  onTextInputActiveChanged: if (!textInputActive && opened) {
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   readonly property var actions: buildActions()
   readonly property var primaryActions: actions.filter(function(a) { return a.section !== "history" })
   readonly property var historyActions: actions.filter(function(a) { return a.section === "history" })
