@@ -539,6 +539,36 @@ check("a client connecting after the daemon is greeted on connect",
       late.recv(4096) == b'{"type":"CTRL_CONNECTED"}\n')
 check("... and is a normal client afterwards", late_conn in hub.clients)
 late.close()
+
+# Greeting a client must never cost us its command. `omarchy-sip send` is
+# fire-and-forget: it writes one line and closes, so it is already gone when
+# the daemon accepts it and the greeting write fails. Dropping the client on
+# that write threw away the command sitting in its receive buffer -- every
+# dial, accept and hangup the panel issued, silently.
+for attempt in range(3):
+    oneshot = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    oneshot.connect(f"/proc/self/fd/{srv_dir}/control")
+    oneshot.sendall(b'{"command":"accept","token":"panel"}\n')
+    oneshot.close()
+    time.sleep(0.05)
+    one_conn = hub.accept()
+    check(f"a fire-and-forget command survives the greeting ({attempt + 1}/3)",
+          one_conn is not None
+          and hub.read_commands(one_conn) == [b'{"command":"accept","token":"panel"}'])
+
+# A write that fails leaves the client readable rather than dropped, and its
+# outbox emptied so a peer that cannot be written to cannot grow the daemon.
+dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+dead.connect(f"/proc/self/fd/{srv_dir}/control")
+dead_conn = hub.accept()
+dead.close()
+for _ in range(3):
+    hub.broadcast('{"type":"CALL_INCOMING"}')
+check("a write error marks the client write-dead instead of dropping it",
+      dead_conn in hub.clients and hub.clients[dead_conn]["wdead"] is True
+      and hub.clients[dead_conn]["out"] == b"")
+check("... and the closed peer is reaped by the read side",
+      hub.read_commands(dead_conn) == [] and dead_conn not in hub.clients)
 hub.close()
 check("closing the hub removes the socket", not os.path.exists(path("run/control")))
 

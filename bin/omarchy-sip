@@ -668,11 +668,9 @@ class ControlHub:
             conn.close()
             return None
         conn.setblocking(False)
-        self.clients[conn] = {"buf": b"", "out": b"", "dropping": False}
+        self.clients[conn] = {"buf": b"", "out": b"", "dropping": False, "wdead": False}
         if self.greeting is not None:
             self.send(conn, self.greeting)
-            if conn not in self.clients:
-                return None   # dropped mid-greeting; never hand it to the caller
         return conn
 
     def drop(self, conn: socket.socket) -> None:
@@ -741,13 +739,23 @@ class ControlHub:
 
     def send(self, conn: socket.socket, data: bytes) -> None:
         state = self.clients.get(conn)
-        if state is None:
+        if state is None or state["wdead"]:
             return
         state["out"] += data
         self.flush(conn)
 
     def flush(self, conn: socket.socket) -> None:
-        """Push what we can without blocking; hang up on a client that stalls."""
+        """Push what we can without blocking; hang up on a client that stalls.
+
+        A failed write does *not* drop the client. The two directions are
+        independent: `omarchy-sip send` is fire-and-forget, so it has closed its
+        end before the daemon even accepts it, and dropping it here would throw
+        away the command already sitting in its receive buffer -- which is
+        exactly what greeting every new client silently did to every dial,
+        accept and hangup the panel issued. Only read_commands() decides a
+        client is finished, because only the read direction can tell us whether
+        it still has something to say.
+        """
         state = self.clients.get(conn)
         if state is None or not state["out"]:
             return
@@ -757,11 +765,13 @@ class ControlHub:
         except BlockingIOError:
             pass
         except OSError:
-            self.drop(conn)
+            state["wdead"] = True    # nothing more can be written to this one
+            state["out"] = b""       # ...so it cannot grow, either
             return
         if len(state["out"]) > self.MAX_OUTBOX:
             # A reader that has stopped reading must not become the daemon's
-            # memory leak.
+            # memory leak. Unlike a write error this is a live peer choosing not
+            # to drain, so hanging up is still the right answer.
             self.drop(conn)
 
     def flush_all(self) -> None:
