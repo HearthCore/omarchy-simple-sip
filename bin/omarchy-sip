@@ -684,6 +684,9 @@ class ControlHub:
         # shell -- never learns the daemon is up and never resets its reconnect
         # backoff. State, not history: only the latest greeting is kept.
         self.greeting: bytes | None = None
+        # Set by the daemon loop once the selector exists, so drop() can
+        # deregister immediately -- see drop() for why this matters.
+        self.sel: "selectors.BaseSelector | None" = None
         try:
             os.unlink(name, dir_fd=dir_fd)   # a stale socket from a crash
         except FileNotFoundError:
@@ -731,6 +734,23 @@ class ControlHub:
 
     def drop(self, conn: socket.socket) -> None:
         self.clients.pop(conn, None)
+        # A closed fd number is recycled by the kernel immediately, and the
+        # next accept() can hand out that exact number to a brand-new
+        # connection before the main loop gets back around to noticing this
+        # one is gone. If the selector still holds the old registration for
+        # that fd when the new connection tries to register, sel.register()
+        # raises KeyError ("already registered") and takes the whole daemon
+        # down with it -- which is exactly what happened on every incoming
+        # call: the ring event went out over broadcast(), hit a client whose
+        # socket had already gone away, drop() closed it here without
+        # telling the selector, and the crash swallowed the very event the
+        # panel needed to show the Answer button. Deregistering here, before
+        # the fd can be reused, closes that window.
+        if self.sel is not None:
+            try:
+                self.sel.unregister(conn)
+            except (KeyError, ValueError):
+                pass
         try:
             conn.close()
         except OSError:
@@ -1176,6 +1196,7 @@ def cmd_daemon(_args) -> int:
 
     tracker = CallTracker(conf_fd())
     sel = selectors.DefaultSelector()
+    hub.sel = sel
     sel.register(bus.fileno(), selectors.EVENT_READ, "bus")
     sel.register(hub.sock, selectors.EVENT_READ, "listen")
 
@@ -1224,7 +1245,16 @@ def cmd_daemon(_args) -> int:
                     for line in hub.read_commands(conn):
                         dispatch(bus, hub, line)
                     if conn not in hub.clients:
-                        sel.unregister(conn)
+                        # hub.drop() (called from read_commands on EOF/error)
+                        # already unregistered and closed this conn, so this
+                        # is now purely defensive against a hub without a
+                        # selector reference -- unregistering an fd that is
+                        # already gone (fileno() == -1 post-close, or simply
+                        # not present) must not crash the whole daemon.
+                        try:
+                            sel.unregister(conn)
+                        except (KeyError, ValueError):
+                            pass
             hub.flush_all()
             cap_baresip_log(log_fd)
     finally:
